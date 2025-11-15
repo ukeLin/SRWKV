@@ -1,0 +1,4 @@
+# ninja log v5
+0	9588	1760075355288478920	/root/autodl-tmp/SRWKV/model/mmseg_custom/ops/build/temp.linux-x86_64-3.8/root/autodl-tmp/SRWKV/model/mmseg_custom/ops/src/cpu/ms_deform_attn_cpu.o	41e1ac00c9117726
+0	20300	1760075366006504868	/root/autodl-tmp/SRWKV/model/mmseg_custom/ops/build/temp.linux-x86_64-3.8/root/autodl-tmp/SRWKV/model/mmseg_custom/ops/src/cuda/ms_deform_attn_cuda.o	58013e4ea76ce63e
+0	27795	1760075373471907428	/root/autodl-tmp/SRWKV/model/mmseg_custom/ops/build/temp.linux-x86_64-3.8/root/autodl-tmp/SRWKV/model/mmseg_custom/ops/src/vision.o	ae7f36500a292482
