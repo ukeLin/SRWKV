@@ -299,4 +299,4 @@ class SRWKV(nn.Module):
         
         out = self.seg_head(dec1)
         
-        return out
+        return out, saliency_mask1

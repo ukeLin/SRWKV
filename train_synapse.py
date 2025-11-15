@@ -47,7 +47,7 @@ class Synapse(L.LightningModule):
         self.tl_metric = CumulativeAverage()
         self.vs_metric = defaultdict(lambda: defaultdict(list))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
         return self._model(x)
 
     def prepare_data(self) -> None:
@@ -95,6 +95,8 @@ class Synapse(L.LightningModule):
         })
 
         self.loss = LOSSES[loss_0[0]](**loss_0[1])
+        self.aux_loss = torch.nn.BCELoss()
+        self.aux_weight = 0.1
 
     @property
     def criterion(self) -> Callable[..., torch.Tensor]:
@@ -139,15 +141,32 @@ class Synapse(L.LightningModule):
         image, label = batch["image"].to(device), batch["label"]
         label = label.to(device)
 
-        pred = self.forward(image)
+        pred, saliency_mask1 = self.forward(image)
         loss = self.criterion(pred, label)
 
-        self.log("loss", loss.item(), prog_bar=True)
+        if label.dim() == 3:
+            label = label.unsqueeze(1)
+        saliency_gt = (label > 0).float()
         
-        self.tl_metric.append(loss.item())
+        if saliency_gt.shape[1] != 1:
+            saliency_gt = saliency_gt.sum(dim=1, keepdim=True).clamp(0, 1)
+        
+        if saliency_mask1.shape[2:] != saliency_gt.shape[2:]:
+            saliency_gt = torch.nn.functional.interpolate(
+                saliency_gt, size=saliency_mask1.shape[2:], mode='bilinear', align_corners=False
+            )
+        
+        aux_loss = self.aux_loss(saliency_mask1, saliency_gt)
+        total_loss = loss + self.aux_weight * aux_loss
+
+        self.log("loss", total_loss.item(), prog_bar=True)
+        self.log("main_loss", loss.item())
+        self.log("aux_loss", aux_loss.item())
+        
+        self.tl_metric.append(total_loss.item())
         self.log("lr", self.optimizers().param_groups[0]["lr"], prog_bar=True)
 
-        return loss
+        return total_loss
 
     def on_train_epoch_end(self) -> None:
         tl = self.tl_metric.aggregate()

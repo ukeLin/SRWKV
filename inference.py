@@ -70,6 +70,8 @@ def test_single_volume(
         model.eval()
         with torch.no_grad():
             outputs = model(input)
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
             if deep_supervision: outputs = sum(outputs)
 
             out = torch.argmax(torch.softmax(outputs, dim=1), dim=1).squeeze(0)
@@ -228,5 +230,5 @@ def test_synapse(ckpt: str) -> None:
     )
 
 if __name__ == '__main__':
-    test_synapse(ckpt="log/SRWKV-synapse/checkpoints/high_dice/epoch=159-val_mean_dice=0.8510.ckpt")
+    test_synapse(ckpt="log/SRWKV-synapse/checkpoints/epoch=159-val_mean_dice=0.8510.ckpt")
     # test_acdc(ckpt="log/SRWKV-acdc/checkpoints/epoch=epoch=504-val_mean_dice=val_mean_dice=0.9230.ckpt")
