@@ -1,9 +1,9 @@
-from .SRWKV import SRWKV
+def build_model(in_channels, num_classes, img_size=224, encoder_pretrained_path=None):
+    from .SRWKV import SRWKV
 
-def build_model(in_channels, num_classes, encoder_pretrained_path=None):
-    model = SRWKV(
-        in_channels=in_channels, 
+    return SRWKV(
+        in_channels=in_channels,
         num_classes=num_classes,
-        encoder_pretrained_path=encoder_pretrained_path
+        img_size=img_size,
+        encoder_pretrained_path=encoder_pretrained_path,
     )
-    return model

@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 from einops import rearrange
 from .scan_scan_inv import vertical_forward_scan, vertical_forward_scan_inv, vertical_backward_scan, vertical_backward_scan_inv
 from .scan_scan_inv import horizontal_forward_scan, horizontal_forward_scan_inv, horizontal_backward_scan, horizontal_backward_scan_inv
@@ -152,7 +152,7 @@ class WKV(torch.autograd.Function):
         ctx.T = T
         ctx.C = C
         if T > T_MAX:
-            print(f"❌ ERROR: T={T} > T_MAX={T_MAX}")
+            print(f"ERROR: T={T} > T_MAX={T_MAX}")
             print(f"  B={B}, C={C}")
             print(f"  k.shape={k.shape}")
         assert T <= T_MAX, f"T={T} exceeds T_MAX={T_MAX}"
@@ -301,7 +301,6 @@ class SpatialInteractionMix(nn.Module):
             xv = x
             xr = x
 
-        # 生成k, v, r
         k = self.key(xk)
         v = self.value(xv)
         r = self.receptance(xr)
@@ -435,8 +434,29 @@ class ShapeGuidedRWKVBranch(nn.Module):
         self.output.scale_init = 0
         self.value.scale_init = 1
     
+    @staticmethod
+    def _gather_tokens(x, indices):
+        if indices.dim() == 1:
+            return x[:, indices, :]
+
+        gather_indices = indices.unsqueeze(-1).expand(-1, -1, x.shape[-1])
+        return torch.gather(x, dim=1, index=gather_indices)
+
+    @staticmethod
+    def _invert_indices(indices):
+        if indices.dim() == 1:
+            return torch.argsort(indices, dim=-1)
+
+        positions = torch.arange(indices.shape[1], device=indices.device, dtype=indices.dtype)
+        positions = positions.unsqueeze(0).expand_as(indices)
+        inverse_indices = torch.empty_like(indices)
+        inverse_indices.scatter_(dim=1, index=indices, src=positions)
+        return inverse_indices
+
     def forward(self, x_seq, scan_indices):
         B, L, C = x_seq.shape
+        if scan_indices.dim() == 2 and scan_indices.shape[0] != B:
+            scan_indices = scan_indices.expand(B, -1)
         
         k = self.key(x_seq)      
         v = self.value(x_seq)    
@@ -444,8 +464,8 @@ class ShapeGuidedRWKVBranch(nn.Module):
         sr = torch.sigmoid(r)
         
       
-        k_scanned = k[:, scan_indices, :]  
-        v_scanned = v[:, scan_indices, :]  
+        k_scanned = self._gather_tokens(k, scan_indices)  
+        v_scanned = self._gather_tokens(v, scan_indices)  
         
        
         rwkv = RUN_CUDA(B, L, C, 
@@ -454,8 +474,8 @@ class ShapeGuidedRWKVBranch(nn.Module):
                        k_scanned, v_scanned) 
         
        
-        inverse_indices = torch.argsort(scan_indices)
-        rwkv_restored = rwkv[:, inverse_indices, :]  
+        inverse_indices = self._invert_indices(scan_indices)
+        rwkv_restored = self._gather_tokens(rwkv, inverse_indices)  
         
         
         if self.key_norm is not None:
@@ -510,7 +530,7 @@ class ShapeGuidedOrientatedRWKV2D(nn.Module):
                 self.shift_func = eval(shift_mode)
         
 
-        self.scan_types = ['sal_first_h', 'sal_first_v', 'non_sal_first_h', 'non_sal_first_v']
+        self.scan_types = ['p1', 'p2', 'p3', 'p4']
         
       
         self.branches = nn.ModuleList([
@@ -525,6 +545,17 @@ class ShapeGuidedOrientatedRWKV2D(nn.Module):
         
       
         self.cross_merge = CrossMerge()
+        self.channel_norm = nn.LayerNorm(n_embd)
+        self.channel_mix = SpectralMixer(
+            n_embd=n_embd,
+            n_layer=n_layer,
+            layer_id=0,
+            shift_mode=shift_mode,
+            channel_gamma=channel_gamma,
+            shift_pixel=shift_pixel,
+            hidden_rate=4,
+            key_norm=key_norm
+        )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
     
@@ -566,47 +597,33 @@ class ShapeGuidedOrientatedRWKV2D(nn.Module):
             print(f"Warning in _process_saliency_mask: {e}")
             return torch.ones(B, 1, H, W, device=device) * 0.5
     
-    def _get_saliency_scan_indices(self, sal_mask, scan_type='sal_first_h'):
-        H, W = sal_mask.shape[-2:]
+    def _get_shape_guided_scan_indices(self, sal_mask):
+        if sal_mask.dim() == 4:
+            sal_mask = sal_mask[:, 0]
+        elif sal_mask.dim() == 2:
+            sal_mask = sal_mask.unsqueeze(0)
+        elif sal_mask.dim() != 3:
+            raise ValueError(f"Expected saliency mask with shape [B,1,H,W], [B,H,W], or [H,W], got {sal_mask.shape}")
+
+        B, H, W = sal_mask.shape
         L = H * W
-        sal_mask = sal_mask.squeeze() 
-        sal_positions = torch.nonzero(sal_mask > 0.5, as_tuple=False) 
-        non_sal_positions = torch.nonzero(sal_mask <= 0.5, as_tuple=False)  
-        if len(sal_positions) == 0 or len(non_sal_positions) == 0:
-            return torch.arange(L, device=sal_mask.device)
-        if scan_type == 'sal_first_h':
-            sal_idx = sal_positions[:, 0] * W + sal_positions[:, 1]
-            sal_idx, _ = torch.sort(sal_idx)
-            non_sal_idx = non_sal_positions[:, 0] * W + non_sal_positions[:, 1]
-            non_sal_idx, _ = torch.sort(non_sal_idx)
-            indices = torch.cat([sal_idx, non_sal_idx])
-            
-        elif scan_type == 'sal_first_v':
-            sal_idx = sal_positions[:, 1] * H + sal_positions[:, 0]
-            sal_idx, _ = torch.sort(sal_idx)
-            sal_idx = (sal_idx % H) * W + (sal_idx // H)
-            non_sal_idx = non_sal_positions[:, 1] * H + non_sal_positions[:, 0]
-            non_sal_idx, _ = torch.sort(non_sal_idx)
-            non_sal_idx = (non_sal_idx % H) * W + (non_sal_idx // H)
-            indices = torch.cat([sal_idx, non_sal_idx])
-            
-        elif scan_type == 'non_sal_first_h':
-            non_sal_idx = non_sal_positions[:, 0] * W + non_sal_positions[:, 1]
-            non_sal_idx, _ = torch.sort(non_sal_idx)
-            sal_idx = sal_positions[:, 0] * W + sal_positions[:, 1]
-            sal_idx, _ = torch.sort(sal_idx)
-            indices = torch.cat([non_sal_idx, sal_idx])
-            
-        else:  
-            non_sal_idx = non_sal_positions[:, 1] * H + non_sal_positions[:, 0]
-            non_sal_idx, _ = torch.sort(non_sal_idx)
-            non_sal_idx = (non_sal_idx % H) * W + (non_sal_idx // H)
-            sal_idx = sal_positions[:, 1] * H + sal_positions[:, 0]
-            sal_idx, _ = torch.sort(sal_idx)
-            sal_idx = (sal_idx % H) * W + (sal_idx // H)
-            indices = torch.cat([non_sal_idx, sal_idx])
-        
-        return indices
+        device = sal_mask.device
+        foreground = sal_mask.reshape(B, L) > 0.5
+
+        raster_indices = torch.arange(L, device=device, dtype=torch.long).unsqueeze(0).expand(B, L)
+        reverse_indices = L - 1 - raster_indices
+
+
+        p1_keys = torch.where(foreground, raster_indices, raster_indices + L)
+        p2_keys = torch.where(~foreground, raster_indices, raster_indices + L)
+        p3_keys = torch.where(foreground, reverse_indices, reverse_indices + L)
+        p4_keys = torch.where(~foreground, reverse_indices, reverse_indices + L)
+
+        p1 = torch.argsort(p1_keys, dim=1)
+        p2 = torch.argsort(p2_keys, dim=1)
+        p3 = torch.argsort(p3_keys, dim=1)
+        p4 = torch.argsort(p4_keys, dim=1)
+        return p1, p2, p3, p4
     
     def forward(self, x, saliency_mask=None):
         B, C, H, W = x.shape
@@ -623,14 +640,20 @@ class ShapeGuidedOrientatedRWKV2D(nn.Module):
         else:
             x_shifted = x_seq
         sal_mask = self._process_saliency_mask(saliency_mask, B, C, H, W, x.device)
+        scan_paths = self._get_shape_guided_scan_indices(sal_mask)
         
         outputs = []
-        for i, (branch, scan_type) in enumerate(zip(self.branches, self.scan_types)):
-            scan_indices = self._get_saliency_scan_indices(sal_mask[0], scan_type) 
+        for i, branch in enumerate(self.branches):
+            scan_indices = scan_paths[i]
             out_group_seq = branch(x_shifted, scan_indices) 
             outputs.append(out_group_seq)
 
         grids = [o.transpose(1, 2).reshape(B, C, H, W) for o in outputs] 
         fused = self.cross_merge(grids)  
         out = x + self.drop_path(fused)
+        channel_seq = out.flatten(2).transpose(1, 2)
+        channel_seq = channel_seq + self.drop_path(
+            self.channel_mix(self.channel_norm(channel_seq), resolution)
+        )
+        out = channel_seq.transpose(1, 2).reshape(B, C, H, W)
         return out

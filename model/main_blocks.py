@@ -1,28 +1,10 @@
 import math
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
 import warnings
 
 def params(module):
     return sum(p.numel() for p in module.parameters())
-
-def visualize(images, x, y):
-    c, h, w = images.shape
-    a = torch.zeros(int(h * x), int(w * y))
-    k = 0
-    m = 0
-    for i in range(x):
-        l = 0
-        for j in range(y):
-            a[k:k + h, l:l + w] = images[m]
-            l += w
-            m += 1
-
-        k += h
-    plt.figure()
-    plt.imshow(a)
-
 
 class conv_block(nn.Module):
     def __init__(self,

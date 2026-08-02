@@ -1,19 +1,18 @@
-import torch
+﻿import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
 import os
 import numpy as np
 import scipy.stats as st
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
 
-from .mmcls_custom.models.backbones.vrwkv import VRWKV_Hierarchical
 from .mmcls_custom.models.backbones.srwkv import ShapeGuidedOrientatedRWKV2D
-from .encoder import Encoder_B, Encoder_S, Encoder_T
+from .encoder import Encoder_S
 from .ccm import CCMix
 
 
@@ -198,43 +197,30 @@ class SRWKV(nn.Module):
     def load_encoder_pretrained(self, pretrained_path):
         print(f"Loading encoder pretrained weights from: {pretrained_path}")
         try:
-            pretrained_dict = torch.load(pretrained_path, map_location='cpu')
-            
-            if 'state_dict' in pretrained_dict:
-                pretrained_dict = pretrained_dict['state_dict']
-            elif 'model' in pretrained_dict:
-                pretrained_dict = pretrained_dict['model']
-            
-            pretrained_params = sum(p.numel() for p in pretrained_dict.values())
-            encoder_params_before = {name: param.clone() for name, param in self.encoder.named_parameters()}
+            pretrained_dict = torch.load(pretrained_path, map_location="cpu")
+
+            if "state_dict" in pretrained_dict:
+                pretrained_dict = pretrained_dict["state_dict"]
+            elif "model" in pretrained_dict:
+                pretrained_dict = pretrained_dict["model"]
+
             msg = self.encoder.load_state_dict(pretrained_dict, strict=False)
-            
-            loaded_params = 0
-            loaded_keys = 0
-            for name, param in self.encoder.named_parameters():
-                if name in pretrained_dict:
-                    loaded_params += param.numel()
-                    loaded_keys += 1
-            
             total_encoder_params = sum(p.numel() for p in self.encoder.parameters())
-            
-            print(f"✓ Encoder pretrained weights loaded successfully!")
-            print(f"  Pretrained file contains: {pretrained_params:,} parameters")
+            loaded_params = sum(
+                param.numel()
+                for name, param in self.encoder.named_parameters()
+                if name in pretrained_dict
+            )
+
+            print("Encoder pretrained weights loaded successfully.")
             print(f"  Encoder total parameters: {total_encoder_params:,}")
-            print(f"  Loaded parameters: {loaded_params:,} ({loaded_params/total_encoder_params*100:.1f}%)")
-            print(f"  Loaded keys: {loaded_keys}")
+            print(f"  Loaded parameters: {loaded_params:,} ({loaded_params / total_encoder_params * 100:.1f}%)")
             print(f"  Missing keys: {len(msg.missing_keys)}")
             print(f"  Unexpected keys: {len(msg.unexpected_keys)}")
-            
-            if msg.missing_keys:
-                print(f"\n  Missing keys (first 10): {msg.missing_keys[:10]}")
-            if msg.unexpected_keys:
-                print(f"  Unexpected keys (first 10): {msg.unexpected_keys[:10]}")
-                
         except Exception as e:
-            print(f"⚠ Warning: Could not load encoder pretrained weights: {e}")
-            print(f"  Continuing with randomly initialized encoder...")
-    
+            print(f"Warning: could not load encoder pretrained weights: {e}")
+            print("  Continuing with randomly initialized encoder.")
+
     def freeze_encoder(self):
         for param in self.encoder.parameters():
             param.requires_grad = False
@@ -299,4 +285,5 @@ class SRWKV(nn.Module):
         
         out = self.seg_head(dec1)
         
-        return out, saliency_mask1
+        return out, guide_saliency
+
